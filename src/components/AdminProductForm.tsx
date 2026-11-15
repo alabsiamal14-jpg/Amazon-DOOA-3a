@@ -25,6 +25,7 @@ import {
 import { Category, Product, StoreSettings, UserProfile } from '../types';
 import { SAMPLE_AI_PRESETS } from '../data/initialData';
 import { getProductFormDraft, saveProductFormDraft, clearProductFormDraft, getAuthHeadersAsync } from '../lib/storage';
+import { compressImageFileToDataUrl, compressDataUrlIfNeeded } from '../lib/imageCompression';
 
 const LazyAIVideoStudio = lazy(() =>
   import('./AIVideoStudio').then((m) => ({ default: m.AIVideoStudio || m.default }))
@@ -56,8 +57,8 @@ export interface BatchProductItem {
 
 interface AdminProductFormProps {
   categories: Category[];
-  onProductCreated: (product: Product) => void;
-  onProductsCreated?: (products: Product[]) => void;
+  onProductCreated: (product: Product) => Promise<void> | void;
+  onProductsCreated?: (products: Product[]) => Promise<void> | void;
   settings: StoreSettings;
   currentUser?: UserProfile | null;
 }
@@ -93,6 +94,8 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
   const [singleImageFile, setSingleImageFile] = useState<File | null>(null);
   const [singleImagePreview, setSingleImagePreview] = useState<string>('');
   const [isSingleAnalyzing, setIsSingleAnalyzing] = useState(false);
+  const [isSingleSubmitting, setIsSingleSubmitting] = useState(false);
+  const [isBatchSaving, setIsBatchSaving] = useState(false);
   const [singleAiSuccess, setSingleAiSuccess] = useState(false);
   const [singleErrorMessage, setSingleErrorMessage] = useState('');
 
@@ -260,12 +263,7 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
   };
 
   const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-    });
+    return compressImageFileToDataUrl(file);
   };
 
   const urlToBase64 = async (url: string): Promise<string> => {
@@ -274,12 +272,7 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
       if (!res.ok) return url;
       const blob = await res.blob();
       if (!blob.type.startsWith('image/')) return url;
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(blob);
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => resolve(url);
-      });
+      return await compressImageFileToDataUrl(blob);
     } catch {
       return url;
     }
@@ -308,6 +301,7 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
 
   // Process a single item within the batch without mutating or losing other items
   const processBatchItem = async (item: BatchProductItem): Promise<BatchProductItem> => {
+    let persistentPreviewUrl = item.previewUrl;
     try {
       // Step 1: Update progress to converting
       setBatchItems((prev) =>
@@ -319,14 +313,18 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
 
       if (item.file) {
         base64 = await fileToBase64(item.file);
-        mimeType = item.file.type || 'image/jpeg';
+        mimeType = base64.startsWith('data:image/jpeg') ? 'image/jpeg' : (item.file.type || 'image/jpeg');
+        persistentPreviewUrl = base64;
       } else if (item.previewUrl) {
         base64 = await urlToBase64(item.previewUrl);
+        if (base64 && base64.startsWith('data:image/')) {
+          persistentPreviewUrl = base64;
+        }
       }
 
       // Step 2: Sending to Gemini API
       setBatchItems((prev) =>
-        prev.map((i) => (i.id === item.id ? { ...i, progress: 60 } : i))
+        prev.map((i) => (i.id === item.id ? { ...i, progress: 60, previewUrl: persistentPreviewUrl } : i))
       );
 
       const aiData = await requestAiAnalysis(base64, mimeType);
@@ -342,6 +340,7 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
 
       const updatedItem: BatchProductItem = {
         ...item,
+        previewUrl: persistentPreviewUrl,
         status: 'completed',
         progress: 100,
         title_ar: aiData.title_ar || 'مستحضر تجميلي فاخر',
@@ -365,6 +364,7 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
           return {
             ...i,
             ...updatedItem,
+            previewUrl: persistentPreviewUrl || i.previewUrl,
             // Keep any user edits that may have occurred
             title_ar: i.title_ar && i.title_ar !== i.fileName ? i.title_ar : updatedItem.title_ar,
             description_ar: i.description_ar || updatedItem.description_ar,
@@ -379,6 +379,7 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
       console.error(`Batch item failed [${item.fileName}]:`, err);
       const failedItem: BatchProductItem = {
         ...item,
+        previewUrl: persistentPreviewUrl,
         status: 'error',
         progress: 100,
         errorMessage: err.message || 'فشل الاتصال بخدمة الذكاء الاصطناعي',
@@ -619,23 +620,28 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
   };
 
   // Convert Batch Item to Product entity
-  const mapBatchItemToProduct = (item: BatchProductItem): Product => {
+  const mapBatchItemToProduct = (item: BatchProductItem, resolvedImageUrl?: string): Product => {
     const selectedCat = categories.find((c) => c.id === item.category_id) || categories[0];
     const tagsArray = item.tagsInput
       ? item.tagsInput.split(/[,،]/).map((t) => t.trim()).filter(Boolean)
       : item.tags;
 
+    const rawPrice = parseFloat(item.original_price);
+    const safePrice = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 120;
+    const rawDiscount = item.discount_price ? parseFloat(item.discount_price) : null;
+    const safeDiscount = rawDiscount !== null && Number.isFinite(rawDiscount) && rawDiscount > 0 ? rawDiscount : null;
+
     return {
       id: 'prod-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
-      title_ar: item.title_ar,
+      title_ar: (item.title_ar || item.fileName || 'منتج جديد').trim().slice(0, 300),
       description_ar: item.description_ar || 'منتج أصلي فاخر للعناية والجمال.',
-      original_price: parseFloat(item.original_price) || 120,
-      discount_price: item.discount_price ? parseFloat(item.discount_price) : null,
-      stock_quantity: parseInt(item.stock_quantity) || 15,
+      original_price: safePrice,
+      discount_price: safeDiscount,
+      stock_quantity: Math.max(0, parseInt(item.stock_quantity) || 15),
       category_id: selectedCat.id,
       category_name: selectedCat.name_ar,
       tags: tagsArray.length > 0 ? tagsArray : ['عناية', 'جمال'],
-      image_url: item.previewUrl,
+      image_url: resolvedImageUrl || item.previewUrl,
       ai_generated: item.ai_generated,
       rating: 5.0,
       reviews_count: 1,
@@ -649,25 +655,50 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
   };
 
   // Save ALL completed items to store - MARKS THEM AS SAVED WITHOUT DELETING OR LOSING THEM
-  const handleSaveAllCompleted = () => {
+  const handleSaveAllCompleted = async () => {
     const completedItems = batchItems.filter((i) => i.status === 'completed');
-    if (completedItems.length === 0) return;
+    if (completedItems.length === 0 || isBatchSaving) return;
 
-    const newProducts = completedItems.map(mapBatchItemToProduct);
+    setIsBatchSaving(true);
+    try {
+      const newProducts: Product[] = await Promise.all(
+        completedItems.map(async (item) => {
+          let persistentImg = item.previewUrl;
+          if (item.file && (!persistentImg || persistentImg.startsWith('blob:'))) {
+            persistentImg = await compressImageFileToDataUrl(item.file);
+          } else if (persistentImg?.startsWith('data:image/')) {
+            persistentImg = await compressDataUrlIfNeeded(persistentImg);
+          }
+          return mapBatchItemToProduct(item, persistentImg);
+        })
+      );
 
-    if (onProductsCreated) {
-      onProductsCreated(newProducts);
-    } else {
-      newProducts.forEach((p) => onProductCreated(p));
+      if (onProductsCreated) {
+        await Promise.resolve(onProductsCreated(newProducts));
+      } else {
+        for (const p of newProducts) {
+          await Promise.resolve(onProductCreated(p));
+        }
+      }
+
+      // Mark as saved so items remain in UI with all data, instead of being discarded!
+      const completedIds = new Set(completedItems.map((i) => i.id));
+      const imgById = new Map(completedItems.map((i, idx) => [i.id, newProducts[idx].image_url]));
+      setBatchItems((prev) =>
+        prev.map((i) =>
+          completedIds.has(i.id)
+            ? { ...i, status: 'saved' as const, previewUrl: imgById.get(i.id) || i.previewUrl }
+            : i
+        )
+      );
+      setSelectedEditItem(null);
+      setBatchNotice(`تم نشر ${newProducts.length} منتجات في المتجر بنجاح!`);
+    } catch (err: any) {
+      console.error('Batch save error:', err);
+      setBatchNotice(`تعذر حفظ بعض المنتجات: ${err?.message || 'يرجى المحاولة مجدداً'}`);
+    } finally {
+      setIsBatchSaving(false);
     }
-
-    // Mark as saved so items remain in UI with all data, instead of being discarded!
-    const completedIds = new Set(completedItems.map((i) => i.id));
-    setBatchItems((prev) =>
-      prev.map((i) => (completedIds.has(i.id) ? { ...i, status: 'saved' as const } : i))
-    );
-    setSelectedEditItem(null);
-    setBatchNotice(`تم نشر ${newProducts.length} منتجات في المتجر بنجاح!`);
   };
 
   // Save single item from edit modal
@@ -696,10 +727,10 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
     setSingleErrorMessage('');
 
     try {
-      // Use persistent base64 preview so it remains available across page reloads
+      // Compress and convert to persistent Data URL before preview/save
       const base64 = await fileToBase64(file);
       setSingleImagePreview(base64);
-      const aiData = await requestAiAnalysis(base64, file.type);
+      const aiData = await requestAiAnalysis(base64, 'image/jpeg');
 
       const matchedCat =
         categories.find(
@@ -722,70 +753,89 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
       setSingleAiSuccess(true);
     } catch (err: any) {
       console.error('Error analyzing single image:', err);
-      setSingleErrorMessage(err.message || 'حدث خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي');
+      setSingleErrorMessage(err.message || 'تعذر التحليل التلقائي بالذكاء الاصطناعي — يمكنك إدخال البيانات يدوياً ثم الحفظ.');
     } finally {
       setIsSingleAnalyzing(false);
     }
   };
 
-  const handleSingleSubmit = (e: React.FormEvent) => {
+  const handleSingleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!singleFormData.title_ar || !singleFormData.original_price || !singleImagePreview) {
-      setSingleErrorMessage('يرجى التأكد من رفع صورة المنتج وإدخال العنوان والسعر الأصلي');
+    setSingleErrorMessage('');
+
+    const cleanTitle = singleFormData.title_ar.trim().slice(0, 300);
+    const parsedPrice = parseFloat(singleFormData.original_price);
+    if (!cleanTitle || !Number.isFinite(parsedPrice) || parsedPrice <= 0 || !singleImagePreview) {
+      setSingleErrorMessage('يرجى التأكد من رفع صورة المنتج وإدخال العنوان وسعر صحيح أكبر من صفر');
       return;
     }
 
-    const selectedCategory = categories.find((c) => c.id === singleFormData.category_id) || categories[0];
-    const tagsArray = singleFormData.tagsInput
-      ? singleFormData.tagsInput.split(/[,،]/).map((t) => t.trim()).filter(Boolean)
-      : singleFormData.tags;
+    const parsedDiscount = singleFormData.discount_price ? parseFloat(singleFormData.discount_price) : null;
+    const safeDiscount = parsedDiscount !== null && Number.isFinite(parsedDiscount) && parsedDiscount > 0 ? parsedDiscount : null;
 
-    const newProduct: Product = {
-      id: 'prod-' + Date.now(),
-      title_ar: singleFormData.title_ar,
-      description_ar: singleFormData.description_ar,
-      original_price: parseFloat(singleFormData.original_price),
-      discount_price: singleFormData.discount_price ? parseFloat(singleFormData.discount_price) : null,
-      stock_quantity: parseInt(singleFormData.stock_quantity) || 15,
-      category_id: selectedCategory.id,
-      category_name: selectedCategory.name_ar,
-      tags: tagsArray,
-      image_url: singleImagePreview,
-      ai_generated: singleAiSuccess,
-      rating: 5.0,
-      reviews_count: 1,
-      how_to_use: singleFormData.how_to_use,
-      ingredients: singleFormData.ingredients,
-      created_at: new Date().toISOString(),
-      featured: true,
-      status: currentUser?.role === 'staff' ? 'draft' : 'published',
-      creator_id: currentUser?.uid,
-    };
+    setIsSingleSubmitting(true);
+    try {
+      const selectedCategory = categories.find((c) => c.id === singleFormData.category_id) || categories[0];
+      const tagsArray = singleFormData.tagsInput
+        ? singleFormData.tagsInput.split(/[,،]/).map((t) => t.trim()).filter(Boolean)
+        : singleFormData.tags;
 
-    onProductCreated(newProduct);
+      const safeImage = singleImagePreview.startsWith('data:image/')
+        ? await compressDataUrlIfNeeded(singleImagePreview)
+        : singleImagePreview;
 
-    // Clear Draft from localStorage upon successful creation
-    clearProductFormDraft();
-    setHasUnsavedChanges(false);
-    setLastAutoSavedTime(null);
-    setDraftRestoredNotice(null);
+      const newProduct: Product = {
+        id: 'prod-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+        title_ar: cleanTitle,
+        description_ar: singleFormData.description_ar.trim(),
+        original_price: parsedPrice,
+        discount_price: safeDiscount,
+        stock_quantity: Math.max(0, parseInt(singleFormData.stock_quantity) || 15),
+        category_id: selectedCategory.id,
+        category_name: selectedCategory.name_ar,
+        tags: tagsArray,
+        image_url: safeImage,
+        ai_generated: singleAiSuccess,
+        rating: 5.0,
+        reviews_count: 1,
+        how_to_use: singleFormData.how_to_use,
+        ingredients: singleFormData.ingredients,
+        created_at: new Date().toISOString(),
+        featured: true,
+        status: currentUser?.role === 'staff' ? 'draft' : 'published',
+        creator_id: currentUser?.uid,
+      };
 
-    // Reset Form
-    setSingleFormData({
-      title_ar: '',
-      description_ar: '',
-      original_price: '',
-      discount_price: '',
-      stock_quantity: '15',
-      category_id: categories[0]?.id || 'skincare',
-      tags: [],
-      tagsInput: '',
-      how_to_use: '',
-      ingredients: '',
-    });
-    setSingleImagePreview('');
-    setSingleImageFile(null);
-    setSingleAiSuccess(false);
+      await Promise.resolve(onProductCreated(newProduct));
+
+      // Clear Draft from localStorage only upon successful save
+      clearProductFormDraft();
+      setHasUnsavedChanges(false);
+      setLastAutoSavedTime(null);
+      setDraftRestoredNotice(null);
+
+      // Reset Form
+      setSingleFormData({
+        title_ar: '',
+        description_ar: '',
+        original_price: '',
+        discount_price: '',
+        stock_quantity: '15',
+        category_id: categories[0]?.id || 'skincare',
+        tags: [],
+        tagsInput: '',
+        how_to_use: '',
+        ingredients: '',
+      });
+      setSingleImagePreview('');
+      setSingleImageFile(null);
+      setSingleAiSuccess(false);
+    } catch (err: any) {
+      console.error('Error saving single product:', err);
+      setSingleErrorMessage(err?.message || 'تعذر حفظ المنتج في قاعدة البيانات، يرجى المحاولة مرة أخرى.');
+    } finally {
+      setIsSingleSubmitting(false);
+    }
   };
 
   // Batch stats
@@ -994,10 +1044,20 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
                     <button
                       type="button"
                       onClick={handleSaveAllCompleted}
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black px-4 py-2 rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer animate-pulse"
+                      disabled={isBatchSaving}
+                      className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white text-xs font-black px-4 py-2 rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer animate-pulse"
                     >
-                      <Check className="w-4 h-4" />
-                      <span>حفظ ونشر جميع المنتجات المكتملة ({completedCount})</span>
+                      {isBatchSaving ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>جاري الحفظ والنشر...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-4 h-4" />
+                          <span>حفظ ونشر جميع المنتجات المكتملة ({completedCount})</span>
+                        </>
+                      )}
                     </button>
                   )}
 
@@ -1439,11 +1499,20 @@ export const AdminProductForm: React.FC<AdminProductFormProps> = ({
 
           <button
             type="submit"
-            disabled={!singleFormData.title_ar || !singleFormData.original_price || !singleImagePreview || isSingleAnalyzing}
+            disabled={!singleFormData.title_ar || !singleFormData.original_price || !singleImagePreview || isSingleAnalyzing || isSingleSubmitting}
             className="w-full bg-rose-600 hover:bg-rose-700 disabled:bg-stone-300 text-white py-3.5 px-6 rounded-2xl font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
-            <Sparkles className="w-5 h-5" />
-            <span>حفظ ونشر المنتج الفردي</span>
+            {isSingleSubmitting ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>جاري الحفظ والنشر...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-5 h-5" />
+                <span>حفظ ونشر المنتج الفردي</span>
+              </>
+            )}
           </button>
         </form>
       )}

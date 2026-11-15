@@ -119,10 +119,10 @@ export const SmartSearchBar: React.FC<SmartSearchBarProps> = ({
   };
 
   return (
-    <div ref={containerRef} className={`relative ${className}`}>
+    <div ref={containerRef} className={`relative w-full min-w-0 ${className}`}>
       {/* Search Input Bar */}
-      <form onSubmit={handleSubmit} className="relative w-full">
-        <div className="relative flex items-center">
+      <form onSubmit={handleSubmit} className="relative w-full min-w-0">
+        <div className="relative flex items-center min-w-0">
           <input
             type="text"
             value={query}

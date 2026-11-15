@@ -49,6 +49,7 @@ export interface Product {
   featured?: boolean;
   status?: 'draft' | 'published';
   creator_id?: string;
+  contact_phone?: string;
 }
 
 export interface CartItem {

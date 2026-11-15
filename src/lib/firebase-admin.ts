@@ -3,6 +3,8 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+let _hasServiceAccount = false;
+
 function getFirebaseAdminOptions(): AppOptions {
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT?.trim();
   if (
@@ -19,6 +21,7 @@ function getFirebaseAdminOptions(): AppOptions {
       if (jsonStr.startsWith('{')) {
         const parsed = JSON.parse(jsonStr);
         if (parsed && typeof parsed === 'object' && parsed.project_id) {
+          _hasServiceAccount = true;
           return {
             credential: cert(parsed),
             projectId: parsed.project_id || firebaseConfig.projectId,
@@ -35,6 +38,8 @@ function getFirebaseAdminOptions(): AppOptions {
 const app = getApps().length === 0 
   ? initializeApp(getFirebaseAdminOptions())
   : getApp();
+
+export const hasAdminServiceAccount = _hasServiceAccount;
 
 export const adminAuth = getAuth(app);
 

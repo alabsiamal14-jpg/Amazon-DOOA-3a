@@ -69,8 +69,8 @@ export interface VideoBatchItem {
 
 interface AIVideoStudioProps {
   categories: Category[];
-  onProductCreated: (product: Product) => void;
-  onProductsCreated?: (products: Product[]) => void;
+  onProductCreated: (product: Product) => Promise<void> | void;
+  onProductsCreated?: (products: Product[]) => Promise<void> | void;
   settings: StoreSettings;
 }
 
@@ -709,7 +709,7 @@ export const AIVideoStudio: React.FC<AIVideoStudioProps> = ({
   };
 
   // Save ALL completed videos as new products in store
-  const handleSaveAllCompletedVideos = () => {
+  const handleSaveAllCompletedVideos = async () => {
     const completedItems = videos.filter((v) => v.status === 'completed');
     if (completedItems.length === 0) return;
 
@@ -719,18 +719,25 @@ export const AIVideoStudio: React.FC<AIVideoStudioProps> = ({
         ? item.tagsInput.split(/[,،]/).map((t) => t.trim()).filter(Boolean)
         : item.tags;
 
+      const rawPrice = parseFloat(item.original_price);
+      const safePrice = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 135;
+      const rawDiscount = item.discount_price ? parseFloat(item.discount_price) : null;
+      const safeDiscount = rawDiscount !== null && Number.isFinite(rawDiscount) && rawDiscount > 0 ? rawDiscount : null;
+      const candidateVideo = item.renderedClipUrl || item.originalUrl;
+      const persistentVideoUrl = candidateVideo && !candidateVideo.startsWith('blob:') ? candidateVideo : undefined;
+
       return {
         id: 'prod-vid-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
-        title_ar: item.title_ar,
+        title_ar: (item.title_ar || 'منتج فيديو').trim().slice(0, 300),
         description_ar: item.description_ar || 'منتج فاخر مع مقطع فيديو تعريفي 5 ثوانٍ بالذكاء الاصطناعي.',
-        original_price: parseFloat(item.original_price) || 135,
-        discount_price: item.discount_price ? parseFloat(item.discount_price) : null,
-        stock_quantity: parseInt(item.stock_quantity) || 15,
+        original_price: safePrice,
+        discount_price: safeDiscount,
+        stock_quantity: Math.max(0, parseInt(item.stock_quantity) || 15),
         category_id: selectedCat.id,
         category_name: selectedCat.name_ar,
         tags: tagsArray.length > 0 ? tagsArray : ['فيديو_منتج', 'عناية_فاخرة'],
         image_url: item.bestFramePoster || 'https://images.unsplash.com/photo-1620916566398-39f1143ab7be?auto=format&fit=crop&w=800&q=80',
-        video_url: item.renderedClipUrl || item.originalUrl,
+        video_url: persistentVideoUrl,
         video_duration: 5,
         ai_generated: true,
         rating: 5.0,
@@ -743,19 +750,25 @@ export const AIVideoStudio: React.FC<AIVideoStudioProps> = ({
       };
     });
 
-    if (onProductsCreated) {
-      onProductsCreated(newProducts);
-    } else {
-      newProducts.forEach((p) => onProductCreated(p));
+    try {
+      if (onProductsCreated) {
+        await Promise.resolve(onProductsCreated(newProducts));
+      } else {
+        for (const p of newProducts) {
+          await Promise.resolve(onProductCreated(p));
+        }
+      }
+
+      // Mark as saved so items remain visible in studio without disappearing
+      const completedIds = new Set(completedItems.map((v) => v.id));
+      setVideos((prev) =>
+        prev.map((v) => (completedIds.has(v.id) ? { ...v, status: 'saved' as const } : v))
+      );
+
+      setStudioNotice(`🎉 تم نشر ${newProducts.length} منتجات مع مقاطع فيديو 5 ثوانٍ في المتجر بنجاح!`);
+    } catch (err: any) {
+      setStudioNotice(`تعذر حفظ منتجات الفيديو: ${err?.message || 'يرجى المحاولة مجدداً'}`);
     }
-
-    // Mark as saved so items remain visible in studio without disappearing
-    const completedIds = new Set(completedItems.map((v) => v.id));
-    setVideos((prev) =>
-      prev.map((v) => (completedIds.has(v.id) ? { ...v, status: 'saved' as const } : v))
-    );
-
-    setStudioNotice(`🎉 تم نشر ${newProducts.length} منتجات مع مقاطع فيديو 5 ثوانٍ في المتجر بنجاح!`);
   };
 
   // Drag handlers

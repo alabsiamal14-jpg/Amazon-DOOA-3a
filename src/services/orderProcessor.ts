@@ -4,7 +4,7 @@ import { getProductById, updateProductStockInDb } from '../db/products.ts';
 import { getOrderByNumber, createOrderInDb } from '../db/orders.ts';
 import { eq } from 'drizzle-orm';
 import { db as firestoreDb } from '../lib/firebase.ts';
-import { adminDb } from '../lib/firebase-admin.ts';
+import { adminDb, hasAdminServiceAccount } from '../lib/firebase-admin.ts';
 import { fetchFirestoreProductById, updateFirestoreProductStock } from '../lib/firestore-catalog.ts';
 import { doc, setDoc } from 'firebase/firestore';
 import { getProductPricing } from '../lib/pricing.ts';
@@ -99,18 +99,20 @@ export async function syncOrderToFirestoreWithRetry(
     updatedAt: new Date().toISOString(),
   };
 
-  // 1. Prefer Admin SDK (works in production with FIREBASE_SERVICE_ACCOUNT)
-  try {
-    await adminDb.collection('orders').doc(idempotencyKey).set(payload, { merge: true });
-    if (isPostgresConfigured) {
-      await db.update(orderOutbox)
-        .set({ status: 'synced', attempts: 1, updatedAt: new Date() })
-        .where(eq(orderOutbox.idempotencyKey, idempotencyKey));
+  // 1. Prefer Admin SDK (when explicit FIREBASE_SERVICE_ACCOUNT is configured)
+  if (hasAdminServiceAccount) {
+    try {
+      await adminDb.collection('orders').doc(idempotencyKey).set(payload, { merge: true });
+      if (isPostgresConfigured) {
+        await db.update(orderOutbox)
+          .set({ status: 'synced', attempts: 1, updatedAt: new Date() })
+          .where(eq(orderOutbox.idempotencyKey, idempotencyKey));
+      }
+      console.info(`[Admin Firestore Sync] Order #${order.order_number} successfully synchronized.`);
+      return 'synced';
+    } catch (adminErr: any) {
+      console.info(`[Admin Firestore Sync] Fallback check for order #${order.order_number}:`, adminErr?.message || 'unavailable');
     }
-    console.info(`[Admin Firestore Sync] Order #${order.order_number} successfully synchronized.`);
-    return 'synced';
-  } catch (adminErr: any) {
-    console.warn(`[Admin Firestore Sync] Fallback check for order #${order.order_number}:`, adminErr?.message || adminErr);
   }
 
   // 2. For authenticated user orders without Admin IAM, let the authenticated frontend mirror to Firestore

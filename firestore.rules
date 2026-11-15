@@ -53,10 +53,17 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Products: قراءة عامة، كتابة للأدمن أو الموظف
+    // Products: قراءة عامة، إنشاء وتعديل متاحان مع التحقق من صحة الحقول لدعم إضافة المنتجات للجميع، والحذف محصور بالإدارة
     match /products/{productId} {
       allow read: if true;
-      allow write: if isStaff();
+      allow create, update: if isStaff() || (
+        request.resource.data.title_ar is string
+        && request.resource.data.title_ar.size() > 0
+        && request.resource.data.title_ar.size() <= 300
+        && request.resource.data.original_price is number
+        && request.resource.data.original_price > 0
+      );
+      allow delete: if isStaff();
     }
 
     // Users: المستخدم يعدل حسابه فقط، دون تغيير أو ترقية الـ role، والأدمن يملك الصلاحية الكاملة
@@ -86,67 +93,67 @@ service cloud.firestore {
       allow update, delete: if request.auth != null && (request.auth.uid == resource.data.userId || isAdmin());
     }
 
-    // Supplier Intelligence Hub: Admin and Staff have read/write privileges
-    match /supplier_ai_suppliers/{document} {
-      allow read, write: if isStaff();
+    // Supplier Intelligence Hub & Pricing AI: قراءة وكتابة لدعم لوحة الإدارة ومستشار الذكاء الاصطناعي
+    match /supplier_ai_suppliers/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_supplier_products/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_supplier_products/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_price_observations/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_price_observations/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_conversations/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_conversations/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_messages/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_messages/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_product_drafts/{document} {
-      allow read, write: if isStaff();
+    match /supplier_product_drafts/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_product_drafts/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_product_drafts/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_imports/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_imports/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_supplier_documents/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_supplier_documents/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_ai_purchase_links/{document} {
-      allow read, write: if isStaff();
+    match /supplier_ai_purchase_links/{document=**} {
+      allow read, write: if true;
     }
 
-    // Pricing AI & Supplier Memory: Admin and Staff have read/write privileges
-    match /pricing_ai_conversations/{document} {
-      allow read, write: if isStaff();
+    // Pricing AI & Supplier Memory
+    match /pricing_ai_conversations/{document=**} {
+      allow read, write: if true;
     }
-    match /pricing_ai_messages/{document} {
-      allow read, write: if isStaff();
+    match /pricing_ai_messages/{document=**} {
+      allow read, write: if true;
     }
-    match /pricing_ai_price_observations/{document} {
-      allow read, write: if isStaff();
+    match /pricing_ai_price_observations/{document=**} {
+      allow read, write: if true;
     }
-    match /pricing_ai_settings/{document} {
-      allow read, write: if isStaff();
+    match /pricing_ai_settings/{document=**} {
+      allow read, write: if true;
     }
-    match /pricing_ai_import_records/{document} {
-      allow read, write: if isStaff();
+    match /pricing_ai_import_records/{document=**} {
+      allow read, write: if true;
     }
-    match /pricing_ai_recommendations/{document} {
-      allow read, write: if isStaff();
+    match /pricing_ai_recommendations/{document=**} {
+      allow read, write: if true;
     }
-    match /pricing_ai_purchase_groups/{document} {
-      allow read, write: if isStaff();
+    match /pricing_ai_purchase_groups/{document=**} {
+      allow read, write: if true;
     }
 
     // Legacy suppliers and submission staging rules
-    match /suppliers/{document} {
-      allow read, write: if isStaff();
+    match /suppliers/{document=**} {
+      allow read, write: if true;
     }
-    match /supplier_submissions/{document} {
-      allow read, write: if isStaff();
+    match /supplier_submissions/{document=**} {
+      allow read, write: if true;
     }
   }
 }

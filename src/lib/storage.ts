@@ -51,11 +51,55 @@ export function getStoredProducts(): Product[] {
 }
 
 export function saveStoredProducts(products: Product[]): void {
+  if (typeof localStorage === 'undefined') return;
   try {
     localStorage.setItem(PRODUCTS_KEY, JSON.stringify(products));
   } catch (e) {
-    console.error('Error saving products to storage:', e);
+    console.warn('Error saving products to storage (retrying with compact cache):', e);
+    try {
+      // Strip bulky base64 data URLs only from older seed items if storage quota is tight,
+      // preserving newly added custom products near the front of the list.
+      const compacted = products.map((p, idx) =>
+        idx >= 40 && typeof p.image_url === 'string' && p.image_url.startsWith('data:image/')
+          ? { ...p, image_url: 'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80' }
+          : p
+      );
+      localStorage.setItem(PRODUCTS_KEY, JSON.stringify(compacted));
+    } catch (retryErr) {
+      console.error('Failed to save compact products cache:', retryErr);
+    }
   }
+}
+
+export function upsertStoredProduct(product: Product): void {
+  if (typeof localStorage === 'undefined' || !product?.id) return;
+  const current = getStoredProducts();
+  const exists = current.some((p) => p.id === product.id);
+  const next = exists
+    ? current.map((p) => (p.id === product.id ? product : p))
+    : [product, ...current];
+  saveStoredProducts(next);
+}
+
+export function upsertStoredProducts(newProducts: Product[]): void {
+  if (typeof localStorage === 'undefined' || !Array.isArray(newProducts) || newProducts.length === 0) return;
+  const current = getStoredProducts();
+  const byId = new Map<string, Product>();
+  for (const p of newProducts) {
+    if (p?.id) byId.set(p.id, p);
+  }
+  for (const p of current) {
+    if (p?.id && !byId.has(p.id)) {
+      byId.set(p.id, p);
+    }
+  }
+  saveStoredProducts(Array.from(byId.values()));
+}
+
+export function removeStoredProduct(productId: string): void {
+  if (typeof localStorage === 'undefined' || !productId) return;
+  const current = getStoredProducts();
+  saveStoredProducts(current.filter((p) => p.id !== productId));
 }
 
 export function getStoredSettings(): StoreSettings {

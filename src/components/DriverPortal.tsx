@@ -319,7 +319,7 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
       )}
 
       {/* Main Container */}
-      <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+      <section className="max-w-4xl mx-auto px-4 py-6 space-y-6">
         {/* Driver Selection Modal / Dropdown */}
         {isChangingDriver && (
           <div className="bg-white p-5 rounded-3xl border border-stone-200 shadow-md space-y-4 animate-in fade-in duration-200">
@@ -717,7 +717,7 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
             })
           )}
         </div>
-      </main>
+      </section>
 
       {/* ======================= MODAL 1: CONFIRM CASH & DELIVERY ======================= */}
       {confirmDeliveryOrder && (

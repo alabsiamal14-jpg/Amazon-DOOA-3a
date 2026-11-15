@@ -33,10 +33,14 @@ import { INITIAL_PRODUCTS } from '../data/initialData';
 import {
   getStoredProducts,
   saveStoredProducts,
+  upsertStoredProduct,
+  removeStoredProduct,
   getStoredOrders,
   saveStoredOrders,
   setFirebaseIdToken,
   registerFirebaseTokenProvider,
+  getAuthHeadersAsync,
+  getAdminToken,
 } from './storage';
 
 // =========================================================================
@@ -191,12 +195,21 @@ export function getFriendlyFirebaseErrorMessage(err: any): string {
       return 'تم تعطيل هذا الحساب من قِبل إدارة النظام.';
     case 'permission-denied':
       return 'ليس لديك الصلاحيات الكافية لتنفيذ هذه العملية.';
+    case 'resource-exhausted':
+    case 'invalid-argument':
+      return 'حجم بيانات المنتج أو الصورة يتجاوز الحد المسموح (1 ميجابايت). يرجى اختيار صورة أصغر أو المحاولة مجدداً.';
     case 'unavailable':
       return 'الخدمة غير متوفرة حالياً، يرجى المحاولة بعد لحظات.';
     default:
       if (err.message && typeof err.message === 'string') {
+        if (err.message.includes('maximum allowed size') || err.message.includes('longer than')) {
+          return 'حجم الصورة أو بيانات المنتج كبير جداً لحفظه. يرجى ضغط الصورة أو استخدام رابط صورة.';
+        }
         if (err.message.includes('offline')) {
           return 'أنت في وضع عدم الاتصال بالإنترنت، تعذر إتمام العملية.';
+        }
+        if (err.message.includes('timeout')) {
+          return 'انتهت مهلة الاتصال بقاعدة البيانات، يرجى التحقق من الشبكة والمحاولة مرة أخرى.';
         }
       }
       return `حدث خطأ غير معروف (${code}): ${err.message || 'يرجى المحاولة لاحقاً.'}`;
@@ -597,7 +610,7 @@ export async function removeWishlistFirestore(userId: string, productId: string)
 export async function fetchProductsFirestore(): Promise<{ products: Product[]; isFirebase: boolean }> {
   try {
     const productsRef = collection(db, 'products');
-    const snap = await withFirestoreTimeout(getDocs(productsRef), 3500);
+    const snap = await withFirestoreTimeout(getDocs(productsRef), 12000);
 
     if (snap.empty) {
       const seeded = await seedInitialProductsFirestore(INITIAL_PRODUCTS);
@@ -629,7 +642,7 @@ export async function fetchProductsFirestore(): Promise<{ products: Product[]; i
         id: docItem.id,
         title_ar: title,
         description_ar: d.description_ar || d.description || '',
-        original_price: price || 50,
+        original_price: price > 0 ? price : 50,
         discount_price: d.discount_price !== undefined && d.discount_price !== null ? Number(d.discount_price) : null,
         stock_quantity: Number(d.stock_quantity ?? d.quantity ?? 10),
         category_id: d.category_id || 'skincare',
@@ -637,8 +650,8 @@ export async function fetchProductsFirestore(): Promise<{ products: Product[]; i
         tags: Array.isArray(d.tags) ? d.tags : [],
         image_url: img,
         gallery_images: Array.isArray(d.gallery_images) ? d.gallery_images : undefined,
-        video_url: d.video_url || undefined,
-        video_duration: d.video_duration || undefined,
+        video_url: typeof d.video_url === 'string' && !d.video_url.startsWith('blob:') ? d.video_url : undefined,
+        video_duration: typeof d.video_duration === 'number' ? d.video_duration : undefined,
         size_or_volume: d.size_or_volume || undefined,
         skin_type: d.skin_type || undefined,
         key_benefits: Array.isArray(d.key_benefits) ? d.key_benefits : undefined,
@@ -647,12 +660,17 @@ export async function fetchProductsFirestore(): Promise<{ products: Product[]; i
         reviews_count: Number(d.reviews_count ?? 1),
         how_to_use: d.how_to_use || undefined,
         ingredients: d.ingredients || undefined,
+        badge: d.badge || undefined,
+        contact_phone: d.contact_phone || undefined,
         created_at: d.createdAt || d.created_at || new Date().toISOString(),
         featured: Boolean(d.featured),
-        status: d.status || 'published',
+        status: d.status === 'draft' ? 'draft' : 'published',
         creator_id: d.creator_id,
       });
     });
+
+    // Sort Firestore items newest-first so newly added products always lead
+    items.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 
     const firestoreIds = new Set(items.map(p => p.id));
     const missingInitial = INITIAL_PRODUCTS.filter(ip => !firestoreIds.has(ip.id));
@@ -698,41 +716,115 @@ export async function seedInitialProductsFirestore(productsList: Product[]): Pro
 
 export async function saveProductFirestore(product: Product): Promise<void> {
   const path = `products/${product.id}`;
+  const cleanTitle = String(product.title_ar || '').trim().slice(0, 300) || 'منتج جديد';
+  const rawPrice = Number(product.original_price);
+  const safeOriginalPrice = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 50;
+  const rawDiscount = product.discount_price !== undefined && product.discount_price !== null ? Number(product.discount_price) : null;
+  const safeDiscountPrice = rawDiscount !== null && Number.isFinite(rawDiscount) && rawDiscount > 0 ? rawDiscount : null;
+  const safeVideoUrl =
+    typeof product.video_url === 'string' && product.video_url.trim() && !product.video_url.startsWith('blob:')
+      ? product.video_url.trim()
+      : null;
+  const safeImageUrl =
+    typeof product.image_url === 'string' && product.image_url.trim() && !product.image_url.startsWith('blob:')
+      ? product.image_url.trim()
+      : 'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80';
+
+  const normalizedProduct: Product = {
+    ...product,
+    title_ar: cleanTitle,
+    original_price: safeOriginalPrice,
+    discount_price: safeDiscountPrice,
+    image_url: safeImageUrl,
+    video_url: safeVideoUrl || undefined,
+    status: product.status || 'published',
+  };
+
+  // Always cache locally immediately so offline/slow refreshes still keep the new product
+  upsertStoredProduct(normalizedProduct);
+
+  const payload: Record<string, any> = {
+    id: normalizedProduct.id,
+    title_ar: cleanTitle,
+    description_ar: String(normalizedProduct.description_ar || ''),
+    original_price: safeOriginalPrice,
+    discount_price: safeDiscountPrice,
+    stock_quantity: Number.isFinite(Number(normalizedProduct.stock_quantity))
+      ? Math.max(0, Math.floor(Number(normalizedProduct.stock_quantity)))
+      : 10,
+    category_id: normalizedProduct.category_id || 'skincare',
+    category_name: normalizedProduct.category_name || 'عناية بالبشرة',
+    image_url: safeImageUrl,
+    gallery_images: Array.isArray(normalizedProduct.gallery_images)
+      ? normalizedProduct.gallery_images.filter((img) => typeof img === 'string' && !img.startsWith('blob:'))
+      : [],
+    video_url: safeVideoUrl,
+    video_duration: typeof normalizedProduct.video_duration === 'number' ? normalizedProduct.video_duration : null,
+    size_or_volume: normalizedProduct.size_or_volume || null,
+    skin_type: normalizedProduct.skin_type || null,
+    key_benefits: Array.isArray(normalizedProduct.key_benefits) ? normalizedProduct.key_benefits : [],
+    how_to_use: normalizedProduct.how_to_use || null,
+    ingredients: normalizedProduct.ingredients || null,
+    badge: normalizedProduct.badge || null,
+    tags: Array.isArray(normalizedProduct.tags) ? normalizedProduct.tags : [],
+    rating: Number.isFinite(Number(normalizedProduct.rating)) ? Number(normalizedProduct.rating) : 5.0,
+    reviews_count: Number.isFinite(Number(normalizedProduct.reviews_count)) ? Number(normalizedProduct.reviews_count) : 1,
+    featured: Boolean(normalizedProduct.featured),
+    ai_generated: Boolean(normalizedProduct.ai_generated),
+    status: normalizedProduct.status || 'published',
+    creator_id: normalizedProduct.creator_id || null,
+    contact_phone: normalizedProduct.contact_phone || null,
+    createdAt: normalizedProduct.created_at || new Date().toISOString(),
+    created_at: normalizedProduct.created_at || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
   try {
     await withFirestoreTimeout(
-      setDoc(doc(db, 'products', product.id), {
-        id: product.id,
-        title_ar: product.title_ar,
-        description_ar: product.description_ar,
-        original_price: product.original_price,
-        discount_price: product.discount_price ?? null,
-        stock_quantity: product.stock_quantity,
-        category_id: product.category_id,
-        category_name: product.category_name,
-        image_url: product.image_url,
-        video_url: product.video_url || null,
-        tags: product.tags || [],
-        rating: product.rating ?? 5.0,
-        reviews_count: product.reviews_count ?? 1,
-        featured: Boolean(product.featured),
-        ai_generated: Boolean(product.ai_generated),
-        status: product.status || 'published',
-        creator_id: product.creator_id || null,
-        createdAt: product.created_at || new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }, { merge: true }),
-      8000
+      setDoc(doc(db, 'products', normalizedProduct.id), payload, { merge: true }),
+      12000
     );
-  } catch (err) {
+  } catch (err: any) {
+    // Only try staff/admin backend fallback when an authenticated session exists
+    if (auth.currentUser || getAdminToken()) {
+      try {
+        const authHeaders = await getAuthHeadersAsync();
+        const res = await fetch('/api/db/products', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify(normalizedProduct),
+        });
+        if (res.ok) {
+          return;
+        }
+      } catch {
+        // Fall through to standard handleFirestoreError
+      }
+    }
     handleFirestoreError(err, OperationType.WRITE, path);
   }
 }
 
 export async function deleteProductFirestore(productId: string): Promise<void> {
   const path = `products/${productId}`;
+  removeStoredProduct(productId);
   try {
-    await withFirestoreTimeout(deleteDoc(doc(db, 'products', productId)), 8000);
-  } catch (err) {
+    await withFirestoreTimeout(deleteDoc(doc(db, 'products', productId)), 10000);
+  } catch (err: any) {
+    if (auth.currentUser || getAdminToken()) {
+      try {
+        const authHeaders = await getAuthHeadersAsync();
+        const res = await fetch(`/api/db/products/${encodeURIComponent(productId)}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+        });
+        if (res.ok) {
+          return;
+        }
+      } catch {
+        // Fall through to standard handleFirestoreError
+      }
+    }
     handleFirestoreError(err, OperationType.DELETE, path);
   }
 }

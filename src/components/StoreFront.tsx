@@ -23,7 +23,8 @@ import {
   Baby,
   Activity,
   Layers,
-  ChevronLeft
+  ChevronLeft,
+  Plus
 } from 'lucide-react';
 import { Category, Product, StoreSettings } from '../types';
 import { ProductCard } from './ProductCard';
@@ -60,6 +61,7 @@ interface StoreFrontProps {
   onOpenAdmin: () => void;
   searchQuery?: string;
   onSearchQueryChange?: (q: string) => void;
+  onOpenPublicAddProduct?: () => void;
 }
 
 export const StoreFront: React.FC<StoreFrontProps> = ({
@@ -75,6 +77,7 @@ export const StoreFront: React.FC<StoreFrontProps> = ({
   onOpenAdmin,
   searchQuery = '',
   onSearchQueryChange,
+  onOpenPublicAddProduct,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedTag, setSelectedTag] = useState<string>('all');
@@ -152,7 +155,9 @@ export const StoreFront: React.FC<StoreFrontProps> = ({
         if (sortBy === 'featured') {
           if (a.featured && !b.featured) return -1;
           if (!a.featured && b.featured) return 1;
-          return (b.rating || 0) - (a.rating || 0);
+          const ratingDiff = (b.rating || 0) - (a.rating || 0);
+          if (ratingDiff !== 0) return ratingDiff;
+          return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
         }
         if (sortBy === 'newest') {
           return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
@@ -201,6 +206,16 @@ export const StoreFront: React.FC<StoreFrontProps> = ({
           </p>
 
           <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+            {onOpenPublicAddProduct && (
+              <button
+                onClick={onOpenPublicAddProduct}
+                className="bg-rose-600 hover:bg-rose-700 text-white text-xs sm:text-sm font-black px-6 py-3.5 rounded-2xl flex items-center gap-2 shadow-xl shadow-rose-900/30 ring-2 ring-rose-400/40 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>أضف منتجك مجاناً (بدون تسجيل دخول) ✨</span>
+              </button>
+            )}
+
             <a
               href={`https://wa.me/${settings.whatsappNumber.replace(/\D/g, '')}?text=${encodeURIComponent(
                 'مرحباً متجر أمازون دعاء، أود الاستفسار وطلب المنتجات.'

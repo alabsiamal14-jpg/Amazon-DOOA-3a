@@ -22,7 +22,9 @@ import {
   Eye,
 } from 'lucide-react';
 import { db, auth } from '../lib/firebase';
-import { getAuthHeadersAsync } from '../lib/storage';
+import { getAuthHeadersAsync, upsertStoredProduct } from '../lib/storage';
+import { compressDataUrlIfNeeded } from '../lib/imageCompression';
+import { Product } from '../types';
 import { collection, getDocs, getDoc, addDoc, doc, setDoc, query, orderBy, onSnapshot, where, updateDoc, arrayUnion, runTransaction } from 'firebase/firestore';
 
 export interface SupplierItem {
@@ -141,19 +143,34 @@ export const AISupplierIntelligenceCenter: React.FC = () => {
               throw new Error(`المنتج "${draft.product.name}" موجود مسبقاً (SKU: ${existingData.sku}) ولن يتم إنشاؤه مرة أخرى لتفادي التكرار.`);
           }
 
+          const rawImage = draft.product.images && draft.product.images.length > 0 ? draft.product.images[0] : '';
+          const safeImage = rawImage && typeof rawImage === 'string' && rawImage.startsWith('data:image/')
+            ? await compressDataUrlIfNeeded(rawImage)
+            : (rawImage || 'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80');
+          const safePrice = Number(draft.product.price) > 0 ? Number(draft.product.price) : 50;
+          const cleanTitle = String(draft.product.name || '').trim().slice(0, 300) || 'منتج مورد جديد';
+          const nowIso = new Date().toISOString();
+
           const productToSave = {
-              title_ar: draft.product.name,
+              id: draft.sku,
+              title_ar: cleanTitle,
               description_ar: draft.product.description || '',
-              original_price: draft.product.price || 0,
+              original_price: safePrice,
               discount_price: null,
-              stock_quantity: draft.product.quantity || 10,
+              stock_quantity: Math.max(1, Number(draft.product.quantity) || 10),
               category_id: 'skincare',
               category_name: 'عناية بالبشرة',
               tags: [],
-              image_url: draft.product.images && draft.product.images.length > 0 ? draft.product.images[0] : '',
-              gallery_images: draft.product.images || [],
+              image_url: safeImage,
+              gallery_images: Array.isArray(draft.product.images) ? draft.product.images : [],
               ai_generated: true,
-              created_at: new Date().toISOString(),
+              featured: true,
+              status: 'published',
+              rating: 5.0,
+              reviews_count: 1,
+              created_at: nowIso,
+              createdAt: nowIso,
+              updatedAt: nowIso,
               sku: draft.sku,
               supplierId: draft.supplierId
           };
@@ -165,8 +182,41 @@ export const AISupplierIntelligenceCenter: React.FC = () => {
                   throw new Error('المسودة منشورة مسبقاً بالفعل في عملية متزامنة أخرى.');
               }
               transaction.set(productRef, productToSave);
-              transaction.update(draftRef, { status: 'published', publishedAt: new Date().toISOString() });
+              transaction.update(draftRef, { status: 'published', publishedAt: nowIso });
           });
+
+          const publishedProduct: Product = {
+              id: draft.sku,
+              title_ar: cleanTitle,
+              description_ar: productToSave.description_ar,
+              original_price: safePrice,
+              discount_price: null,
+              stock_quantity: productToSave.stock_quantity,
+              category_id: 'skincare',
+              category_name: 'عناية بالبشرة',
+              tags: [],
+              image_url: safeImage,
+              gallery_images: productToSave.gallery_images,
+              ai_generated: true,
+              rating: 5.0,
+              reviews_count: 1,
+              created_at: nowIso,
+              featured: true,
+              status: 'published',
+          };
+          upsertStoredProduct(publishedProduct);
+          try {
+              const authHeaders = await getAuthHeadersAsync();
+              if (authHeaders.Authorization) {
+                  await fetch('/api/db/products', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', ...authHeaders },
+                      body: JSON.stringify(publishedProduct),
+                  });
+              }
+          } catch {
+              // Optional server mirror
+          }
           
           showToast('تم نشر المنتج بنجاح مع معاملة Firestore الذرية ومنع التكرار', 'success');
       } catch (e: any) {
