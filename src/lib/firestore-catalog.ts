@@ -8,11 +8,19 @@ const DEFAULT_FALLBACK_IMAGE =
 
 let cachedCatalog: Product[] | null = null;
 let cachedAt = 0;
-const CATALOG_CACHE_TTL_MS = 15_000;
+const CATALOG_CACHE_TTL_MS = 5_000;
 
 export function invalidateFirestoreCatalogCache(): void {
   cachedCatalog = null;
   cachedAt = 0;
+}
+
+function sortProductsNewestFirst(items: Product[]): Product[] {
+  return [...items].sort((a, b) => {
+    const tA = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const tB = b.created_at ? new Date(b.created_at).getTime() : 0;
+    return (Number.isFinite(tB) ? tB : 0) - (Number.isFinite(tA) ? tA : 0);
+  });
 }
 
 export function normalizeFirestoreProduct(docId: string, d: Record<string, any>): Product | null {
@@ -82,15 +90,16 @@ export async function fetchFirestoreCatalog(forceRefresh = false): Promise<Produ
   // 1. Try Admin SDK first (only when FIREBASE_SERVICE_ACCOUNT is configured)
   if (hasAdminServiceAccount) {
     try {
-      const snap = await withFirestoreTimeout(adminDb.collection('products').get(), 3000);
+      const snap = await withFirestoreTimeout(adminDb.collection('products').get(), 8000);
       const items: Product[] = [];
       snap.forEach((docSnap) => {
         const normalized = normalizeFirestoreProduct(docSnap.id, docSnap.data());
         if (normalized) items.push(normalized);
       });
-      cachedCatalog = items;
+      const sorted = sortProductsNewestFirst(items);
+      cachedCatalog = sorted;
       cachedAt = Date.now();
-      return items;
+      return sorted;
     } catch {
       // Fall back to public-read Client SDK when Admin IAM is unavailable
     }
@@ -98,15 +107,16 @@ export async function fetchFirestoreCatalog(forceRefresh = false): Promise<Produ
 
   // 2. Public-read Client SDK fallback (products has `allow read: if true` in firestore.rules)
   try {
-    const snap = await withFirestoreTimeout(getDocs(collection(clientDb, 'products')), 3500);
+    const snap = await withFirestoreTimeout(getDocs(collection(clientDb, 'products')), 12000);
     const items: Product[] = [];
     snap.forEach((docSnap) => {
       const normalized = normalizeFirestoreProduct(docSnap.id, docSnap.data());
       if (normalized) items.push(normalized);
     });
-    cachedCatalog = items;
+    const sorted = sortProductsNewestFirst(items);
+    cachedCatalog = sorted;
     cachedAt = Date.now();
-    return items;
+    return sorted;
   } catch (err: any) {
     console.warn('[Firestore Catalog] Could not read Firestore products:', err?.message || err);
     return cachedCatalog || [];

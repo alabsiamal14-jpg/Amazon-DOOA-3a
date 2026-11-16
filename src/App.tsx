@@ -187,70 +187,126 @@ export default function App() {
     }, 3500);
   };
 
-  // Initial load from Firebase Firestore with server DB + cloud/local fallback
+  // Initial load from Firebase Firestore + server DB in parallel for fast, resilient mobile refresh
   useEffect(() => {
-    async function loadData() {
-      // 1. Products: Fetch from Firebase Firestore, and merge server DB catalog
-      const fsResult = await fetchProductsFirestore();
-      let baseProducts = fsResult.products || [];
+    let cancelled = false;
 
-      try {
-        const sqlRes = await fetch('/api/db/products');
-        if (sqlRes.ok) {
-          const sqlProds = await sqlRes.json();
-          if (Array.isArray(sqlProds) && sqlProds.length > 0) {
-            const mapped: Product[] = sqlProds.map((sp: any) => ({
-              id: sp.productId || sp.id || String(sp.id),
-              title_ar: sp.titleAr || sp.title_ar,
-              description_ar: sp.descriptionAr || sp.description_ar || '',
-              original_price: Number(sp.originalPrice ?? sp.original_price ?? 50),
-              discount_price:
-                sp.discountPrice !== null && sp.discountPrice !== undefined
-                  ? Number(sp.discountPrice)
-                  : sp.discount_price !== null && sp.discount_price !== undefined
-                    ? Number(sp.discount_price)
-                    : null,
-              stock_quantity: Number(sp.stockQuantity ?? sp.stock_quantity ?? 10),
-              category_id: sp.categoryId || sp.category_id || 'skincare',
-              category_name: sp.categoryName || sp.category_name || 'عناية بالبشرة',
-              tags: sp.tags || [],
-              image_url:
-                sp.imageUrl ||
-                sp.image_url ||
-                'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80',
-              gallery_images: Array.isArray(sp.galleryImages) ? sp.galleryImages : undefined,
-              how_to_use: sp.howToUse || sp.how_to_use || undefined,
-              ingredients: sp.ingredients || undefined,
-              badge: sp.badge || undefined,
-              rating: Number(sp.rating ?? 5.0),
-              reviews_count: Number(sp.reviewsCount ?? sp.reviews_count ?? 1),
-              ai_generated: Boolean(sp.aiGenerated ?? sp.ai_generated),
-              featured: Boolean(sp.featured),
-              status: sp.status === 'draft' ? 'draft' : 'published',
-              creator_id: sp.creatorId || sp.creator_id,
-              created_at: sp.createdAt ? new Date(sp.createdAt).toISOString() : new Date().toISOString(),
-            }));
+    const mapServerProduct = (sp: any): Product => ({
+      id: sp.productId || sp.id || String(sp.id),
+      title_ar: sp.titleAr || sp.title_ar,
+      description_ar: sp.descriptionAr || sp.description_ar || '',
+      original_price: Number(sp.originalPrice ?? sp.original_price ?? 50),
+      discount_price:
+        sp.discountPrice !== null && sp.discountPrice !== undefined
+          ? Number(sp.discountPrice)
+          : sp.discount_price !== null && sp.discount_price !== undefined
+            ? Number(sp.discount_price)
+            : null,
+      stock_quantity: Number(sp.stockQuantity ?? sp.stock_quantity ?? 10),
+      category_id: sp.categoryId || sp.category_id || 'skincare',
+      category_name: sp.categoryName || sp.category_name || 'عناية بالبشرة',
+      tags: Array.isArray(sp.tags) ? sp.tags : [],
+      image_url:
+        sp.imageUrl ||
+        sp.image_url ||
+        'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80',
+      gallery_images: Array.isArray(sp.galleryImages)
+        ? sp.galleryImages
+        : Array.isArray(sp.gallery_images)
+          ? sp.gallery_images
+          : undefined,
+      size_or_volume: sp.sizeOrVolume || sp.size_or_volume || undefined,
+      skin_type: sp.skinType || sp.skin_type || undefined,
+      key_benefits: Array.isArray(sp.keyBenefits)
+        ? sp.keyBenefits
+        : Array.isArray(sp.key_benefits)
+          ? sp.key_benefits
+          : undefined,
+      how_to_use: sp.howToUse || sp.how_to_use || undefined,
+      ingredients: sp.ingredients || undefined,
+      badge: sp.badge || undefined,
+      rating: Number(sp.rating ?? 5.0),
+      reviews_count: Number(sp.reviewsCount ?? sp.reviews_count ?? 1),
+      ai_generated: Boolean(sp.aiGenerated ?? sp.ai_generated),
+      featured: Boolean(sp.featured),
+      status: sp.status === 'draft' ? 'draft' : 'published',
+      creator_id: sp.creatorId || sp.creator_id,
+      contact_phone: sp.contactPhone || sp.contact_phone || undefined,
+      created_at: sp.createdAt
+        ? new Date(sp.createdAt).toISOString()
+        : sp.created_at
+          ? new Date(sp.created_at).toISOString()
+          : new Date().toISOString(),
+    });
 
-            const existingIds = new Set(baseProducts.map((p) => p.id));
-            const missingFromBase = mapped.filter((mp) => mp.id && !existingIds.has(mp.id));
-            if (missingFromBase.length > 0) {
-              baseProducts = [...missingFromBase, ...baseProducts];
-              saveStoredProducts(baseProducts);
-            }
-          }
-        }
-      } catch (sqlErr) {
-        console.warn('Could not fetch products from /api/db/products:', sqlErr);
+    const mergeAndSortCatalog = (primary: Product[], secondary: Product[]): Product[] => {
+      const byId = new Map<string, Product>();
+      for (const p of primary) {
+        if (p?.id) byId.set(p.id, p);
       }
+      for (const p of secondary) {
+        if (p?.id && !byId.has(p.id)) {
+          byId.set(p.id, p);
+        }
+      }
+      return Array.from(byId.values()).sort((a, b) => {
+        const tA = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const tB = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return (Number.isFinite(tB) ? tB : 0) - (Number.isFinite(tA) ? tA : 0);
+      });
+    };
 
-      if (baseProducts.length > 0) {
-        setProducts(baseProducts);
+    async function loadData() {
+      const serverPromise: Promise<Product[]> = fetch('/api/db/products?fresh=1', {
+        cache: 'no-store',
+      })
+        .then(async (res) => {
+          if (!res.ok) return [];
+          const sqlProds = await res.json();
+          if (!Array.isArray(sqlProds)) return [];
+          const mapped = sqlProds.map(mapServerProduct).filter((p) => p.id && p.title_ar);
+          if (!cancelled && mapped.length > 0) {
+            setProducts((prev) => mergeAndSortCatalog(mapped, prev));
+          }
+          return mapped;
+        })
+        .catch((err) => {
+          console.warn('Could not fetch products from /api/db/products:', err);
+          return [];
+        });
+
+      const fsPromise = fetchProductsFirestore();
+
+      const [fsOutcome, serverOutcome] = await Promise.allSettled([fsPromise, serverPromise]);
+      if (cancelled) return;
+
+      const fsProducts =
+        fsOutcome.status === 'fulfilled' && fsOutcome.value?.isFirebase
+          ? fsOutcome.value.products
+          : [];
+      const serverProducts = serverOutcome.status === 'fulfilled' ? serverOutcome.value : [];
+      const localFallback =
+        fsOutcome.status === 'fulfilled' ? fsOutcome.value.products : getStoredProducts();
+
+      const primary = fsProducts.length > 0 ? fsProducts : serverProducts;
+      const secondary = fsProducts.length > 0 ? serverProducts : localFallback;
+      const merged = mergeAndSortCatalog(primary, secondary);
+
+      if (merged.length > 0) {
+        saveStoredProducts(merged);
+        setProducts(merged);
       } else {
         const pResult = await fetchProductsCloud();
-        setProducts(pResult.products);
+        if (!cancelled) {
+          setProducts(pResult.products);
+        }
       }
     }
+
     loadData();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Listen to Firebase Authentication State & Real-Time Cart Listener Lifecycle

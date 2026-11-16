@@ -261,4 +261,32 @@ describe('Amazon Duaa API Health & Security Audit', () => {
     expect(res.body.order.discount_amount).toBe(Math.round(unitPrice * 0.1));
     expect(res.body.order.delivery_fee).toBe(unitPrice >= 200 ? 0 : 25);
   });
+
+  it('POST /api/db/products/public validates input, persists product, and GET /api/db/products?fresh=1 serves no-store catalog', async () => {
+    const invalidRes = await request(app).post('/api/db/products/public').send({
+      title_ar: '',
+      original_price: 0,
+      image_url: 'blob:http://localhost/temp',
+    });
+    expect(invalidRes.status).toBe(400);
+
+    const testId = `visitor-prod-test-${Date.now()}`;
+    const validRes = await request(app).post('/api/db/products/public').send({
+      id: testId,
+      title_ar: 'عطر اختبار الهاتف المحمول',
+      original_price: 120,
+      stock_quantity: 5,
+      category_id: 'perfumes',
+      category_name: 'عطور فاخرة',
+      image_url: 'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80',
+    });
+    expect(validRes.status).toBe(200);
+    expect(validRes.body.success).toBe(true);
+    expect(validRes.body.product.productId).toBe(testId);
+
+    const freshRes = await request(app).get('/api/db/products?fresh=1');
+    expect(freshRes.status).toBe(200);
+    expect(freshRes.headers['cache-control']).toContain('no-store');
+    expect((freshRes.body as any[]).some((p) => p.productId === testId)).toBe(true);
+  });
 });

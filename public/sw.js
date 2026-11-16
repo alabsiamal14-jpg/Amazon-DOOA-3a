@@ -1,16 +1,14 @@
-const CACHE_NAME = 'amazon-duaa-cache-v1';
-const ASSETS_TO_CACHE = [
+const CACHE_NAME = 'amazon-duaa-cache-v2';
+const PRECACHE_ASSETS = [
   '/',
   '/index.html',
-  '/src/main.tsx',
-  '/src/App.tsx',
-  '/src/index.css'
+  '/manifest.json',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS_TO_CACHE);
+      return cache.addAll(PRECACHE_ASSETS).catch(() => {});
     })
   );
   self.skipWaiting();
@@ -33,33 +31,61 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+
   const url = new URL(event.request.url);
+
+  // Never intercept or cache cross-origin requests (Firebase, Firestore, Google APIs, CDN images)
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // Network-only (no-store) for API routes; return offline JSON only on network failure
   if (url.pathname.startsWith('/api/')) {
-    // Network first for API calls
     event.respondWith(
-      fetch(event.request).catch(() => {
-        return new Response(JSON.stringify({ error: 'أنت في وضع عدم الاتصال بالإنترنت (Offline Mode).' }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' }
-        });
+      fetch(event.request, { cache: 'no-store' }).catch(() => {
+        return new Response(
+          JSON.stringify({ error: 'أنت في وضع عدم الاتصال بالإنترنت (Offline Mode).' }),
+          {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
       })
     );
     return;
   }
 
-  // Cache first for static assets, network fallback
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      return cachedResponse || fetch(event.request).then((networkResponse) => {
-        return caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, networkResponse.clone());
+  // Network-first for HTML navigation & Vite bundles so phones always get the latest deployment on refresh
+  const isNavigation =
+    event.request.mode === 'navigate' ||
+    url.pathname === '/' ||
+    url.pathname === '/index.html';
+
+  if (isNavigation) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.ok && networkResponse.type === 'basic') {
+            const copy = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', copy)).catch(() => {});
+          }
           return networkResponse;
-        });
-      }).catch(() => {
-        if (event.request.mode === 'navigate') {
-          return caches.match('/index.html');
+        })
+        .catch(() => caches.match('/index.html'))
+    );
+    return;
+  }
+
+  // Network-first with cache fallback for same-origin static assets (JS/CSS/icons)
+  event.respondWith(
+    fetch(event.request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.ok && networkResponse.type === 'basic') {
+          const copy = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => {});
         }
-      });
-    })
+        return networkResponse;
+      })
+      .catch(() => caches.match(event.request))
   );
 });

@@ -56,18 +56,30 @@ export function saveStoredProducts(products: Product[]): void {
     localStorage.setItem(PRODUCTS_KEY, JSON.stringify(products));
   } catch (e) {
     console.warn('Error saving products to storage (retrying with compact cache):', e);
-    try {
-      // Strip bulky base64 data URLs only from older seed items if storage quota is tight,
-      // preserving newly added custom products near the front of the list.
-      const compacted = products.map((p, idx) =>
-        idx >= 40 && typeof p.image_url === 'string' && p.image_url.startsWith('data:image/')
-          ? { ...p, image_url: 'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80' }
-          : p
-      );
-      localStorage.setItem(PRODUCTS_KEY, JSON.stringify(compacted));
-    } catch (retryErr) {
-      console.error('Failed to save compact products cache:', retryErr);
+    const fallbackImg = 'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=800&q=80';
+    for (const keepCount of [25, 10, 3, 0]) {
+      try {
+        const compacted = products.map((p, idx) => {
+          const stripImage =
+            idx >= keepCount && typeof p.image_url === 'string' && p.image_url.startsWith('data:image/');
+          const stripGallery =
+            idx >= keepCount && Array.isArray(p.gallery_images)
+              ? p.gallery_images.filter((g) => typeof g === 'string' && !g.startsWith('data:image/'))
+              : p.gallery_images;
+          if (!stripImage && stripGallery === p.gallery_images) return p;
+          return {
+            ...p,
+            ...(stripImage ? { image_url: fallbackImg } : {}),
+            ...(stripGallery !== p.gallery_images ? { gallery_images: stripGallery } : {}),
+          };
+        });
+        localStorage.setItem(PRODUCTS_KEY, JSON.stringify(compacted));
+        return;
+      } catch {
+        // Try smaller keepCount
+      }
     }
+    console.error('Failed to save compact products cache after stripping data URLs.');
   }
 }
 

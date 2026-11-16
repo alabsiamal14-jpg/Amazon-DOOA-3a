@@ -29,7 +29,7 @@ import supplierReviewRouter from './src/server/routes/whatsapp-supplier-ai/revie
 import pricingRouter from './src/server/routes/pricing-ai/pricing.ts';
 import exportRouter from './src/server/routes/pricing-ai/export.ts';
 import { adminAuth, adminDb, hasAdminServiceAccount } from './src/lib/firebase-admin.ts';
-import { syncFirestoreProduct, deleteFirestoreProduct } from './src/lib/firestore-catalog.ts';
+import { syncFirestoreProduct, deleteFirestoreProduct, invalidateFirestoreCatalogCache } from './src/lib/firestore-catalog.ts';
 import firebaseConfig from './firebase-applet-config.json';
 import { triggerOrderConfirmation } from './src/lib/notifications.ts';
 import * as supplierRag from './src/features/whatsapp-supplier-ai/services/rag.ts';
@@ -252,16 +252,21 @@ app.patch('/api/db/users/:email/role', requireAdmin, async (req: AuthRequest, re
   }
 });
 
-// Cloud SQL Products API
+// Cloud SQL & Firestore Products API
 app.get('/api/db/products', async (req, res) => {
   try {
-    const { status } = req.query;
-    let productsList = await getAllProducts();
-    
+    const { status, fresh } = req.query;
+    const forceRefresh = fresh === '1' || fresh === 'true';
+    if (forceRefresh) {
+      invalidateFirestoreCatalogCache();
+    }
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    let productsList = await getAllProducts(forceRefresh);
+
     if (status) {
       productsList = productsList.filter((p: any) => p.status === status);
     }
-    
+
     return res.json(productsList);
   } catch (error: any) {
     console.error('Failed to fetch products from Cloud SQL:', error);
@@ -269,10 +274,95 @@ app.get('/api/db/products', async (req, res) => {
   }
 });
 
+// Public endpoint for visitor/mobile devices to save products durably and invalidate cache
+app.post('/api/db/products/public', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const cleanTitle = String(body.title_ar || '').trim();
+    const numericPrice = Number(body.original_price);
+    const rawImageUrl = String(body.image_url || '').trim();
+
+    if (!cleanTitle || cleanTitle.length > 300) {
+      return res.status(400).json({ error: 'يرجى إدخال اسم منتج صحيح (1 - 300 حرف).' });
+    }
+    if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+      return res.status(400).json({ error: 'يرجى إدخال سعر صحيح أكبر من صفر.' });
+    }
+    if (!rawImageUrl || rawImageUrl.startsWith('blob:')) {
+      return res.status(400).json({ error: 'يرجى إرفاق صورة صالحة للمنتج.' });
+    }
+    if (rawImageUrl.length > 900_000) {
+      return res.status(400).json({ error: 'حجم الصورة كبير جداً، يرجى اختيار صورة أصغر.' });
+    }
+
+    const safeId =
+      typeof body.id === 'string' && body.id.trim().length > 0 && body.id.trim().length <= 120
+        ? body.id.trim()
+        : `visitor-prod-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+    const safeCreatedAt =
+      typeof body.created_at === 'string' && !Number.isNaN(Date.parse(body.created_at))
+        ? body.created_at
+        : new Date().toISOString();
+
+    const sanitizedProduct = {
+      id: safeId,
+      title_ar: cleanTitle,
+      description_ar: String(body.description_ar || 'منتج مضاف بواسطة زائر - ضمان الجودة والأصالة من أمازون دعاء.').slice(0, 4000),
+      original_price: numericPrice,
+      discount_price:
+        body.discount_price !== null && body.discount_price !== undefined && Number(body.discount_price) > 0
+          ? Number(body.discount_price)
+          : null,
+      stock_quantity: Math.max(1, Math.floor(Number(body.stock_quantity ?? 10) || 10)),
+      category_id: String(body.category_id || 'skincare').slice(0, 80),
+      category_name: String(body.category_name || 'عناية بالبشرة').slice(0, 120),
+      image_url: rawImageUrl,
+      tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 15) : ['مضاف_حديثاً', 'منتج_زائر'],
+      rating: 5.0,
+      reviews_count: 1,
+      featured: true,
+      ai_generated: false,
+      status: 'published' as const,
+      contact_phone: body.contact_phone ? String(body.contact_phone).slice(0, 40) : undefined,
+      created_at: safeCreatedAt,
+    };
+
+    const saved = await upsertProduct(sanitizedProduct);
+    const firestoreSynced = await syncFirestoreProduct(sanitizedProduct.id, {
+      id: sanitizedProduct.id,
+      title_ar: sanitizedProduct.title_ar,
+      description_ar: sanitizedProduct.description_ar,
+      original_price: sanitizedProduct.original_price,
+      discount_price: sanitizedProduct.discount_price,
+      stock_quantity: sanitizedProduct.stock_quantity,
+      category_id: sanitizedProduct.category_id,
+      category_name: sanitizedProduct.category_name,
+      image_url: sanitizedProduct.image_url,
+      tags: sanitizedProduct.tags,
+      rating: sanitizedProduct.rating,
+      reviews_count: sanitizedProduct.reviews_count,
+      featured: sanitizedProduct.featured,
+      ai_generated: sanitizedProduct.ai_generated,
+      status: sanitizedProduct.status,
+      contact_phone: sanitizedProduct.contact_phone || null,
+      created_at: sanitizedProduct.created_at,
+      createdAt: sanitizedProduct.created_at,
+      updatedAt: new Date().toISOString(),
+    });
+    invalidateFirestoreCatalogCache();
+
+    return res.json({ success: true, product: saved, firestoreSynced });
+  } catch (error: any) {
+    console.error('Failed to save public product:', error);
+    return res.status(500).json({ error: error.message || 'تعذر حفظ المنتج في الخادم.' });
+  }
+});
+
 app.post('/api/db/products', requireStaffOrAdmin, async (req: AuthRequest, res) => {
   try {
     const productData = req.body;
-    console.log('[DEBUG] Saving product:', productData);
+    console.log('[DEBUG] Saving product:', productData?.id, productData?.title_ar);
     if (!productData || !productData.id || !productData.title_ar) {
       console.warn('[DEBUG] Invalid product data:', productData);
       return res.status(400).json({ error: 'Product id and title_ar are required' });
@@ -280,6 +370,7 @@ app.post('/api/db/products', requireStaffOrAdmin, async (req: AuthRequest, res) 
     const saved = await upsertProduct(productData);
     console.log('[DEBUG] Product saved successfully:', saved.productId);
 
+    const safeCreatedAt = productData.created_at || new Date().toISOString();
     await syncFirestoreProduct(productData.id, {
       id: productData.id,
       title_ar: productData.title_ar,
@@ -290,8 +381,15 @@ app.post('/api/db/products', requireStaffOrAdmin, async (req: AuthRequest, res) 
       category_id: productData.category_id || 'skincare',
       category_name: productData.category_name || 'عناية بالبشرة',
       image_url: productData.image_url || '',
-      video_url: productData.video_url || null,
+      ...(Array.isArray(productData.gallery_images) ? { gallery_images: productData.gallery_images } : {}),
+      video_url: productData.video_url && !String(productData.video_url).startsWith('blob:') ? productData.video_url : null,
       tags: productData.tags || [],
+      ...(productData.size_or_volume ? { size_or_volume: productData.size_or_volume } : {}),
+      ...(productData.skin_type ? { skin_type: productData.skin_type } : {}),
+      ...(Array.isArray(productData.key_benefits) ? { key_benefits: productData.key_benefits } : {}),
+      ...(productData.how_to_use ? { how_to_use: productData.how_to_use } : {}),
+      ...(productData.ingredients ? { ingredients: productData.ingredients } : {}),
+      ...(productData.badge ? { badge: productData.badge } : {}),
       rating: Number(productData.rating ?? 5.0),
       reviews_count: Number(productData.reviews_count ?? 1),
       featured: Boolean(productData.featured),
@@ -299,9 +397,11 @@ app.post('/api/db/products', requireStaffOrAdmin, async (req: AuthRequest, res) 
       status: productData.status || 'published',
       creator_id: productData.creator_id || null,
       contact_phone: productData.contact_phone || null,
-      createdAt: productData.created_at || new Date().toISOString(),
+      created_at: safeCreatedAt,
+      createdAt: safeCreatedAt,
       updatedAt: new Date().toISOString(),
     });
+    invalidateFirestoreCatalogCache();
 
     return res.json(saved);
   } catch (error: any) {

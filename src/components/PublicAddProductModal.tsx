@@ -97,7 +97,29 @@ export const PublicAddProductModal: React.FC<PublicAddProductModalProps> = ({
         contact_phone: contactPhone.trim() || settings.whatsappNumber,
       };
 
-      await saveProductFirestore(newProduct);
+      const fsPromise = saveProductFirestore(newProduct);
+      const apiPromise = fetch('/api/db/products/public', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newProduct),
+      }).then(async (res) => {
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.error || 'تعذر الحفظ في خادم المتجر');
+        }
+        return res.json();
+      });
+
+      const [fsOutcome, apiOutcome] = await Promise.allSettled([fsPromise, apiPromise]);
+      const firestoreOk = fsOutcome.status === 'fulfilled';
+      const serverOk = apiOutcome.status === 'fulfilled';
+
+      if (!firestoreOk && !serverOk) {
+        const fsMsg = fsOutcome.status === 'rejected' ? fsOutcome.reason?.message : '';
+        const apiMsg = apiOutcome.status === 'rejected' ? apiOutcome.reason?.message : '';
+        throw new Error(fsMsg || apiMsg || 'تعذر حفظ المنتج، يرجى التحقق من الاتصال والمحاولة مرة أخرى.');
+      }
+
       onProductAdded(newProduct);
 
       setSuccessMessage('تم إضافة المنتج ونشره في المتجر بنجاح!');

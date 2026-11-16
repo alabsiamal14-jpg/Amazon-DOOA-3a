@@ -46,8 +46,8 @@ function productToDbRow(p: Product, numericId: number): DbProductRow {
   };
 }
 
-async function getUnifiedFallbackProducts(): Promise<DbProductRow[]> {
-  const fsProducts = await fetchFirestoreCatalog();
+async function getUnifiedFallbackProducts(forceRefresh = false): Promise<DbProductRow[]> {
+  const fsProducts = await fetchFirestoreCatalog(forceRefresh);
   const byProductId = new Map<string, DbProductRow>();
   let idx = 1;
 
@@ -72,9 +72,9 @@ async function getUnifiedFallbackProducts(): Promise<DbProductRow[]> {
   return Array.from(byProductId.values());
 }
 
-export async function getAllProducts() {
+export async function getAllProducts(forceRefresh = false) {
   if (!isPostgresConfigured) {
-    const unified = await getUnifiedFallbackProducts();
+    const unified = await getUnifiedFallbackProducts(forceRefresh);
     return unified.sort(
       (a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0)
     );
